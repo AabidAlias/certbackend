@@ -46,7 +46,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         settings.FRONTEND_ORIGIN,
-        "https://automatecirt.vercel.app",
+        "https://gencirty.vercel.app",
         "http://localhost:5173",
         "http://localhost:3000",
     ],
