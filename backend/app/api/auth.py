@@ -1,12 +1,13 @@
 """
 app/api/auth.py
-Fixed: proper DB queries, no full collection scans on login.
+Fixed: proper DB queries, consent fields accepted from frontend.
 """
 import hashlib
 import uuid
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 
 from app.utils.helpers import get_logger, utcnow
 
@@ -34,9 +35,7 @@ def _safe_user(doc: dict) -> dict:
         "email": doc["email"],
         "org_name": doc["org_name"],
         "sender_email": doc.get("sender_email", ""),
-        "has_sender_configured": bool(
-            doc.get("sender_email") and doc.get("sender_app_password")
-        ),
+        "has_sender_configured": bool(doc.get("sender_email")),
         "token": make_token(doc["user_id"]),
     }
 
@@ -49,7 +48,11 @@ class RegisterRequest(BaseModel):
     password: str
     org_name: str
     sender_email: str
-    sender_app_password: str
+    sender_app_password: Optional[str] = "not-required"
+    # Consent fields — accepted but not required to prevent 422
+    agree_terms: Optional[bool] = True
+    agree_data: Optional[bool] = True
+    agree_password: Optional[bool] = True
 
 
 class LoginRequest(BaseModel):
@@ -60,7 +63,7 @@ class LoginRequest(BaseModel):
 class UpdateSenderRequest(BaseModel):
     token: str
     sender_email: str
-    sender_app_password: str
+    sender_app_password: Optional[str] = "not-required"
 
 
 # ── Register ───────────────────────────────────────────────────────────────────
@@ -73,8 +76,8 @@ async def register(req: RegisterRequest):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered.")
 
-    if not req.sender_email or not req.sender_app_password:
-        raise HTTPException(status_code=400, detail="Gmail and App Password are required.")
+    if not req.sender_email:
+        raise HTTPException(status_code=400, detail="Gmail address is required.")
 
     user_id = str(uuid.uuid4())
     doc = {
@@ -84,7 +87,7 @@ async def register(req: RegisterRequest):
         "password_hash": hash_password(req.password),
         "org_name": req.org_name.strip(),
         "sender_email": req.sender_email.strip().lower(),
-        "sender_app_password": req.sender_app_password.strip(),
+        "sender_app_password": req.sender_app_password or "not-required",
         "created_at": utcnow(),
     }
     await db.users.insert_one(doc)
@@ -98,7 +101,6 @@ async def register(req: RegisterRequest):
 async def login(req: LoginRequest):
     db = get_db()
 
-    # Direct query by email index — fast
     user = await db.users.find_one({"email": req.email.lower().strip()})
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -116,8 +118,6 @@ async def login(req: LoginRequest):
 async def update_sender(req: UpdateSenderRequest):
     db = get_db()
 
-    # Find user by their token — compute expected token for each user
-    # More efficient: store token hash in DB
     all_users = await db.users.find(
         {}, {"user_id": 1, "email": 1}
     ).to_list(length=10000)
@@ -132,11 +132,10 @@ async def update_sender(req: UpdateSenderRequest):
         {"user_id": matched["user_id"]},
         {"$set": {
             "sender_email": req.sender_email.strip().lower(),
-            "sender_app_password": req.sender_app_password.strip(),
+            "sender_app_password": req.sender_app_password or "not-required",
         }}
     )
 
-    # Return updated user
     updated = await db.users.find_one({"user_id": matched["user_id"]})
     logger.info(f"Sender updated: {matched['email']}")
     return _safe_user(updated)
