@@ -1,23 +1,19 @@
 """
 services/email_service.py
-Sends certificate emails using Brevo SMTP.
-Brevo works on Railway (unlike Gmail SMTP which is blocked).
-The user's Gmail is set as Reply-To so recipients can reply to them directly.
+Sends certificate emails using Brevo HTTP API (not SMTP).
+HTTP API works on Railway — SMTP ports are blocked.
 """
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from pathlib import Path
+import base64
 import os
+from pathlib import Path
 
-import aiosmtplib
+import httpx
 
 from app.utils.helpers import get_logger, replace_template_vars
 
 logger = get_logger(__name__)
 
-SMTP_HOST = "smtp-relay.brevo.com"
-SMTP_PORT = 587
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 
 
 async def send_certificate_email(
@@ -26,47 +22,60 @@ async def send_certificate_email(
     subject_template: str,
     body_template: str,
     pdf_path: str | Path,
-    sender_email: str,
-    sender_app_password: str,
+    sender_email: str,        # user's Gmail — used as Reply-To
+    sender_app_password: str, # not used, kept for compatibility
 ) -> None:
-    subject = replace_template_vars(subject_template, recipient_name)
-    body    = replace_template_vars(body_template, recipient_name)
+    subject  = replace_template_vars(subject_template, recipient_name)
+    body     = replace_template_vars(body_template, recipient_name)
     pdf_path = Path(pdf_path)
 
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    brevo_user         = os.environ.get("BREVO_SMTP_USER", "")
-    brevo_password     = os.environ.get("BREVO_SMTP_PASSWORD", "")
-    brevo_sender_email = os.environ.get("BREVO_SENDER_EMAIL", brevo_user)
+    brevo_api_key      = os.environ.get("BREVO_API_KEY", "")
+    brevo_sender_email = os.environ.get("BREVO_SENDER_EMAIL", "")
     brevo_sender_name  = os.environ.get("BREVO_SENDER_NAME", "GenCirty")
 
-    if not brevo_user or not brevo_password:
-        raise ValueError("Brevo SMTP credentials not configured in environment.")
+    if not brevo_api_key:
+        raise ValueError("BREVO_API_KEY not configured in environment.")
+    if not brevo_sender_email:
+        raise ValueError("BREVO_SENDER_EMAIL not configured in environment.")
 
-    message = MIMEMultipart()
-    message["From"]     = f"{brevo_sender_name} <{brevo_sender_email}>"
-    message["To"]       = recipient_email
-    message["Subject"]  = subject
-    message["Reply-To"] = sender_email
-
-    message.attach(MIMEText(body, "plain"))
-
+    # Encode PDF as base64
     with open(pdf_path, "rb") as f:
-        part = MIMEApplication(f.read(), _subtype="pdf")
-        part.add_header(
-            "Content-Disposition",
-            "attachment",
-            filename=f"certificate_{recipient_name.replace(' ', '_')}.pdf",
-        )
-        message.attach(part)
+        pdf_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    await aiosmtplib.send(
-        message,
-        hostname=SMTP_HOST,
-        port=SMTP_PORT,
-        username=brevo_user,
-        password=brevo_password,
-        start_tls=True,
-    )
-    logger.info(f"✅ Email sent via Brevo to {recipient_email} (reply-to: {sender_email})")
+    filename = f"certificate_{recipient_name.replace(' ', '_')}.pdf"
+
+    payload = {
+        "sender": {
+            "name": brevo_sender_name,
+            "email": brevo_sender_email,
+        },
+        "replyTo": {
+            "email": sender_email,
+            "name": recipient_name,
+        },
+        "to": [{"email": recipient_email, "name": recipient_name}],
+        "subject": subject,
+        "textContent": body,
+        "attachment": [
+            {
+                "name": filename,
+                "content": pdf_b64,
+            }
+        ],
+    }
+
+    headers = {
+        "api-key": brevo_api_key,
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(BREVO_API_URL, json=payload, headers=headers)
+
+    if response.status_code not in (200, 201):
+        raise RuntimeError(f"Brevo API error {response.status_code}: {response.text}")
+
+    logger.info(f"✅ Email sent via Brevo API to {recipient_email}")
