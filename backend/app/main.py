@@ -44,14 +44,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://gencirty.vercel.app",
-        "https://gencirty-ll6ev0vzj-aabidalis-projects.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:3000",
-        settings.FRONTEND_ORIGIN,
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -65,7 +59,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # Keep response compatible with FastAPI defaults while logging the real cause.
     logger.warning(
         "Validation error on %s %s: %s",
         request.method,
