@@ -3,8 +3,6 @@ nixPkgs = ["zlib", "libjpeg", "libpng", "freetype"]
 
 [variables]
 NIXPACKS_PYTHON_VERSION = "3.11"
-```
 
-And update `requirements.txt` to a pandas version compatible with Python 3.11:
-```
-pandas==2.2.2
+[start]
+cmd = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
