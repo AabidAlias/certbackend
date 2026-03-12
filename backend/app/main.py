@@ -42,10 +42,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ── CORS ───────────────────────────────────────────────────────────────────────
+# Must use specific origins (not "*") when Authorization header is sent.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "https://gencirty.vercel.app",
+        "https://gencirty-ll6ev0vzj-aabidalis-projects.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
