@@ -1,10 +1,8 @@
 """
 services/email_service.py
 Sends certificate emails using the USER's own Gmail credentials.
-Each user provides their own Gmail + App Password — not a shared account.
+Uses port 465 with SSL (port 587 is blocked on Railway).
 """
-import base64
-import os
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,7 +15,7 @@ from app.utils.helpers import get_logger, replace_template_vars
 logger = get_logger(__name__)
 
 SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
+SMTP_PORT = 465  # SSL port — 587 is blocked on Railway
 
 
 async def send_certificate_email(
@@ -29,18 +27,6 @@ async def send_certificate_email(
     sender_email: str,
     sender_app_password: str,
 ) -> None:
-    """
-    Send a certificate email using the user's own Gmail credentials.
-
-    Args:
-        recipient_name: Full name of the recipient
-        recipient_email: Recipient email address
-        subject_template: Subject with optional {{name}}
-        body_template: Body with optional {{name}}
-        pdf_path: Path to the generated PDF
-        sender_email: User's Gmail address (sends FROM this)
-        sender_app_password: User's Gmail App Password
-    """
     subject = replace_template_vars(subject_template, recipient_name)
     body    = replace_template_vars(body_template, recipient_name)
     pdf_path = Path(pdf_path)
@@ -68,13 +54,14 @@ async def send_certificate_email(
         )
         message.attach(part)
 
-    # Send via user's Gmail SMTP
+    # Send via port 465 SSL (not STARTTLS)
     await aiosmtplib.send(
         message,
         hostname=SMTP_HOST,
         port=SMTP_PORT,
         username=sender_email,
         password=sender_app_password,
-        start_tls=True,
+        use_tls=True,      # SSL from the start
+        start_tls=False,   # Do NOT use STARTTLS on port 465
     )
-    logger.info(f"Email sent from {sender_email} to {recipient_email}")
+    logger.info(f"✅ Email sent from {sender_email} to {recipient_email}")
