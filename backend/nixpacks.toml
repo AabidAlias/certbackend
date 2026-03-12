@@ -4,5 +4,9 @@ nixPkgs = ["python311", "zlib", "libjpeg", "libpng", "freetype"]
 [variables]
 NIXPACKS_PYTHON_VERSION = "3.11"
 
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+
 [start]
 cmd = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
