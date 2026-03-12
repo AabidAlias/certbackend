@@ -12,3 +12,4 @@ email-validator==2.1.1
 qrcode[pil]==7.4.2
 aiofiles==23.2.1
 resend==2.2.0
+httpx==0.27.0
