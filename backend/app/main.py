@@ -85,3 +85,10 @@ app.include_router(auth_router)
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "2.0.0"}
+
+
+
+
+@app.head("/health")
+async def health_head():
+    return JSONResponse(content={})
