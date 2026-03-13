@@ -79,7 +79,6 @@ async def get_template_path(user_id: str, db) -> Path:
     """
     template_bytes = await load_template_from_db(user_id, db)
     if not template_bytes:
-        # Fall back to default template file if exists
         if settings.TEMPLATE_PATH.exists():
             return settings.TEMPLATE_PATH
         raise HTTPException(
@@ -87,7 +86,6 @@ async def get_template_path(user_id: str, db) -> Path:
             detail="No certificate template found. Please upload a template first."
         )
 
-    # Write to /tmp (temporary, but fine — only needed during PDF generation)
     tmp_path = Path(f"/tmp/template_{user_id}.png")
     tmp_path.write_bytes(template_bytes)
     return tmp_path
@@ -109,7 +107,6 @@ async def upload_template(
 
     content = await file.read()
 
-    # Store in MongoDB — works on any hosting platform
     await save_template_to_db(user["user_id"], content, db)
 
     logger.info(f"Template saved to DB for user: {user['email']}")
@@ -142,7 +139,6 @@ async def send_batch(
             detail="Please configure your Gmail sender credentials before sending."
         )
 
-    # Check template exists
     template_check = await db.templates.find_one({"user_id": user["user_id"]})
     if not template_check and not settings.TEMPLATE_PATH.exists():
         raise HTTPException(
@@ -169,7 +165,8 @@ async def send_batch(
     for name, email in rows:
         cert_id = generate_certificate_id()
         short_id = cert_id.replace("-", "").upper()[:5]
-        cert_number = f"{org_name.strip().replace(' ', '-')}-{year}-{short_id}"
+        # ✅ FIX 1: cert_number always fully uppercase
+        cert_number = f"{org_name.strip().replace(' ', '-').upper()}-{year}-{short_id}"
         docs.append({
             "certificate_id": cert_id,
             "cert_number": cert_number,
@@ -210,7 +207,6 @@ async def _process_batch(
     name_x_cm, name_y_cm, text_box_width_cm,
     sender_email, sender_password, db
 ):
-    # Load template once for the whole batch
     try:
         template_path = await get_template_path(user_id, db)
     except Exception as e:
@@ -326,8 +322,12 @@ async def get_status(batch_id: str, skip: int = 0, limit: int = 10000):
 @router.get("/verify/{cert_number}")
 async def verify_certificate(cert_number: str):
     db = get_db()
+    # ✅ FIX 2: case-insensitive search so any format works
     doc = await db.certificates.find_one(
-        {"cert_number": cert_number.upper().strip(), "status": CertificateStatus.SENT},
+        {
+            "cert_number": {"$regex": f"^{cert_number.strip()}$", "$options": "i"},
+            "status": CertificateStatus.SENT
+        },
         {"_id": 0, "name": 1, "cert_number": 1, "org_name": 1, "created_at": 1}
     )
     if not doc:
@@ -379,7 +379,6 @@ async def download_zip(batch_id: str):
     if not records:
         raise HTTPException(status_code=404, detail="Batch not found.")
 
-    # Get user_id from first record to load their template
     user_id = records[0].get("user_id", "")
     try:
         template_path = await get_template_path(user_id, db)
