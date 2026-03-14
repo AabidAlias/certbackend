@@ -1,14 +1,15 @@
 """
 api/payments.py
-Razorpay payment integration.
-After payment verified → credits added → invoice PDF sent via Brevo.
+Razorpay payment integration using direct HTTP API (no razorpay SDK).
+The razorpay package is incompatible with Python 3.13 on Railway.
 """
+import base64
 import hashlib
 import hmac
 import os
 import uuid
 
-import razorpay
+import httpx
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/api/payments", tags=["Payments"])
 
 PRICE_PER_EMAIL = 3.4
 MIN_EMAILS = 35
+RAZORPAY_API = "https://api.razorpay.com/v1"
 
 
 def get_db():
@@ -39,12 +41,13 @@ async def get_user_by_token(token: str, db) -> dict:
     return user
 
 
-def get_razorpay_client():
+def get_auth_header():
     key_id     = os.environ.get("RAZORPAY_KEY_ID", "")
     key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
     if not key_id or not key_secret:
         raise HTTPException(status_code=500, detail="Payment system not configured.")
-    return razorpay.Client(auth=(key_id, key_secret))
+    credentials = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
+    return {"Authorization": f"Basic {credentials}", "Content-Type": "application/json"}
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
@@ -76,16 +79,25 @@ async def create_order(
     amount_inr   = round(req.email_count * PRICE_PER_EMAIL, 2)
     amount_paise = int(amount_inr * 100)
 
-    client = get_razorpay_client()
-    order = client.order.create({
+    payload = {
         "amount": amount_paise,
         "currency": "INR",
         "receipt": f"order_{uuid.uuid4().hex[:8]}",
-        "notes": {
-            "user_id": user["user_id"],
-            "email_count": req.email_count,
-        }
-    })
+        "notes": {"user_id": user["user_id"], "email_count": req.email_count},
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"{RAZORPAY_API}/orders",
+            json=payload,
+            headers=get_auth_header(),
+        )
+
+    if response.status_code != 200:
+        logger.error(f"Razorpay order error: {response.text}")
+        raise HTTPException(status_code=502, detail="Failed to create payment order.")
+
+    order = response.json()
 
     await db.orders.insert_one({
         "order_id": order["id"],
@@ -122,7 +134,7 @@ async def verify_payment(
     if not key_secret:
         raise HTTPException(status_code=500, detail="Payment system not configured.")
 
-    # Verify Razorpay signature
+    # Verify signature
     body     = f"{req.razorpay_order_id}|{req.razorpay_payment_id}"
     expected = hmac.new(key_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
 
@@ -139,16 +151,13 @@ async def verify_payment(
     email_count = order_doc["email_count"]
     paid_at     = utcnow()
 
-    # Add credits to user
     await db.users.update_one(
         {"user_id": user["user_id"]},
         {"$inc": {"credits": email_count}}
     )
 
-    # Generate invoice number
     invoice_number = f"GC-{paid_at.strftime('%Y%m%d')}-{req.razorpay_order_id[-6:].upper()}"
 
-    # Mark order as paid
     await db.orders.update_one(
         {"order_id": req.razorpay_order_id},
         {"$set": {
@@ -162,7 +171,6 @@ async def verify_payment(
     updated_user = await db.users.find_one({"user_id": user["user_id"]})
     credits = updated_user.get("credits", 0)
 
-    # Send invoice PDF via Brevo (non-blocking)
     try:
         await send_invoice_email(
             customer_name=user["name"],
@@ -177,7 +185,7 @@ async def verify_payment(
     except Exception as e:
         logger.error(f"Invoice email failed (non-critical): {e}")
 
-    logger.info(f"Payment verified: {req.razorpay_payment_id} | +{email_count} credits | Invoice: {invoice_number}")
+    logger.info(f"Payment verified: {req.razorpay_payment_id} | +{email_count} credits")
     return {
         "success": True,
         "credits_added": email_count,
