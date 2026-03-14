@@ -30,6 +30,7 @@ async def lifespan(app: FastAPI):
     await db.certificates.create_index("cert_number")
     await db.certificates.create_index("status")
     await db.users.create_index("email", unique=True)
+    await db.orders.create_index("order_id", unique=True)  # ✅ NEW: orders index
 
     logger.info(f"Connected to MongoDB: {settings.MONGO_DB_NAME}")
     yield
@@ -43,7 +44,6 @@ app = FastAPI(
 )
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
-# Must use specific origins (not "*") when Authorization header is sent.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -77,16 +77,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 from app.api.certificate import router as cert_router
 from app.api.auth import router as auth_router
+from app.api.payments import router as payments_router  # ✅ NEW
 
 app.include_router(cert_router)
 app.include_router(auth_router)
+app.include_router(payments_router)  # ✅ NEW
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "2.0.0"}
-
-
 
 
 @app.head("/health")

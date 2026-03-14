@@ -1,7 +1,6 @@
 """
 api/certificate.py
-Updated for hosting: templates stored in MongoDB GridFS (not local disk).
-This means templates survive server restarts and redeploys on Railway/Render.
+Updated: credits check before sending, deduct credits on batch start.
 """
 import asyncio
 import zipfile
@@ -12,7 +11,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Header
 from fastapi.responses import StreamingResponse
-from motor.motor_asyncio import AsyncIOMotorDatabase
 import motor.motor_asyncio
 
 from app.core.config import settings
@@ -51,41 +49,27 @@ async def get_user_by_token(token: str, db) -> dict:
     return user
 
 
-# ── Template stored in MongoDB (survives restarts) ─────────────────────────────
+# ── Template stored in MongoDB ─────────────────────────────────────────────────
 
 async def save_template_to_db(user_id: str, file_bytes: bytes, db):
-    """Store template PNG in MongoDB as binary — no local disk needed."""
     await db.templates.update_one(
         {"user_id": user_id},
-        {"$set": {
-            "user_id": user_id,
-            "data": file_bytes,
-            "updated_at": utcnow(),
-        }},
+        {"$set": {"user_id": user_id, "data": file_bytes, "updated_at": utcnow()}},
         upsert=True,
     )
 
 
 async def load_template_from_db(user_id: str, db) -> bytes | None:
-    """Load template PNG from MongoDB."""
     doc = await db.templates.find_one({"user_id": user_id})
     return doc["data"] if doc else None
 
 
 async def get_template_path(user_id: str, db) -> Path:
-    """
-    Load template from MongoDB and write to /tmp for use during this request.
-    /tmp is always available even on Railway/Render.
-    """
     template_bytes = await load_template_from_db(user_id, db)
     if not template_bytes:
         if settings.TEMPLATE_PATH.exists():
             return settings.TEMPLATE_PATH
-        raise HTTPException(
-            status_code=400,
-            detail="No certificate template found. Please upload a template first."
-        )
-
+        raise HTTPException(status_code=400, detail="No certificate template found. Please upload a template first.")
     tmp_path = Path(f"/tmp/template_{user_id}.png")
     tmp_path.write_bytes(template_bytes)
     return tmp_path
@@ -100,15 +84,11 @@ async def upload_template(
 ):
     if not file.filename.lower().endswith(".png"):
         raise HTTPException(status_code=400, detail="Template must be a PNG file.")
-
     token = authorization.replace("Bearer ", "").strip()
     db = get_db()
     user = await get_user_by_token(token, db)
-
     content = await file.read()
-
     await save_template_to_db(user["user_id"], content, db)
-
     logger.info(f"Template saved to DB for user: {user['email']}")
     return {"message": "Template uploaded and saved successfully."}
 
@@ -134,17 +114,11 @@ async def send_batch(
     sender_password = user.get("sender_app_password", "")
 
     if not sender_email or not sender_password:
-        raise HTTPException(
-            status_code=400,
-            detail="Please configure your Gmail sender credentials before sending."
-        )
+        raise HTTPException(status_code=400, detail="Please configure your Gmail sender credentials before sending.")
 
     template_check = await db.templates.find_one({"user_id": user["user_id"]})
     if not template_check and not settings.TEMPLATE_PATH.exists():
-        raise HTTPException(
-            status_code=400,
-            detail="Please upload a certificate template first."
-        )
+        raise HTTPException(status_code=400, detail="Please upload a certificate template first.")
 
     if not csv_file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Must be a CSV file.")
@@ -158,6 +132,21 @@ async def send_batch(
     if not rows:
         raise HTTPException(status_code=400, detail="CSV has no valid rows.")
 
+    # ✅ CREDITS CHECK
+    user_credits = user.get("credits", 0)
+    required = len(rows)
+    if user_credits < required:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient credits. You need {required} credits but have {user_credits}. Please purchase more."
+        )
+
+    # ✅ DEDUCT CREDITS before processing
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$inc": {"credits": -required}}
+    )
+
     batch_id = generate_certificate_id()
     year = datetime.utcnow().year
 
@@ -165,7 +154,6 @@ async def send_batch(
     for name, email in rows:
         cert_id = generate_certificate_id()
         short_id = cert_id.replace("-", "").upper()[:5]
-        # ✅ FIX 1: cert_number always fully uppercase
         cert_number = f"{org_name.strip().replace(' ', '-').upper()}-{year}-{short_id}"
         docs.append({
             "certificate_id": cert_id,
@@ -182,7 +170,7 @@ async def send_batch(
         })
 
     await db.certificates.insert_many(docs)
-    logger.info(f"Batch {batch_id}: {len(docs)} records | from: {sender_email}")
+    logger.info(f"Batch {batch_id}: {len(docs)} records | from: {sender_email} | credits deducted: {required}")
 
     asyncio.create_task(_process_batch(
         batch_id=batch_id,
@@ -254,22 +242,14 @@ async def _process_single(
 
     try:
         generate_certificate_pdf(
-            name=name,
-            certificate_id=cert_id,
-            cert_number=cert_number,
-            output_path=pdf_path,
-            name_x_cm=name_x_cm,
-            name_y_cm=name_y_cm,
-            text_box_width_cm=text_box_width_cm,
-            template_path=template_path,
+            name=name, certificate_id=cert_id, cert_number=cert_number,
+            output_path=pdf_path, name_x_cm=name_x_cm, name_y_cm=name_y_cm,
+            text_box_width_cm=text_box_width_cm, template_path=template_path,
         )
         await send_certificate_email(
-            recipient_name=name,
-            recipient_email=email,
-            subject_template=email_subject,
-            body_template=email_body,
-            pdf_path=pdf_path,
-            sender_email=sender_email,
+            recipient_name=name, recipient_email=email,
+            subject_template=email_subject, body_template=email_body,
+            pdf_path=pdf_path, sender_email=sender_email,
             sender_app_password=sender_password,
         )
         await db.certificates.update_one(
@@ -322,7 +302,6 @@ async def get_status(batch_id: str, skip: int = 0, limit: int = 10000):
 @router.get("/verify/{cert_number}")
 async def verify_certificate(cert_number: str):
     db = get_db()
-    # ✅ FIX 2: case-insensitive search so any format works
     doc = await db.certificates.find_one(
         {
             "cert_number": {"$regex": f"^{cert_number.strip()}$", "$options": "i"},
